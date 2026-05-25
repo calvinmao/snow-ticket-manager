@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.7.1] - 2026-05-25
+
+### Removed
+- **`cookies` permission** removed from `manifest.json`. The extension does not call the `chrome.cookies` API — session authentication relies on the user's existing same-origin browser session via `credentials: "same-origin"` in `fetch`. The permission was declared unnecessarily.
+
+### Fixed
+- Chrome Web Store policy compliance (Purple Potassium / "requested but not used" violation for v1.7). Re-submission with the minimum permission set.
+
+### Technical
+- Updated comments in `background.js` and `content-snow.js` to clarify that the extension piggybacks on browser session cookies (no chrome.cookies API).
+- Remaining declared permissions: `activeTab`, `scripting`, `sidePanel`. All are actively used.
+- `host_permissions` unchanged: `*://avaya.service-now.com/*`, `*://gct.avaya.com/*`.
+
 ## [1.7] - 2026-05-22
 
 ### Changed

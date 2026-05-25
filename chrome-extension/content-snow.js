@@ -1,5 +1,6 @@
-// This file is injected into ServiceNow pages via chrome.scripting.executeScript
-// It runs in the page context with full access to cookies and g_ck
+// This file is injected into ServiceNow pages via chrome.scripting.executeScript.
+// It runs in the page's MAIN world; fetch uses credentials: "same-origin" so the
+// user's existing session cookies are sent automatically (no chrome.cookies API).
 
 async function snowFetch(method, relUrl, body) {
   const headers = { "Content-Type": "application/json", Accept: "application/json" };

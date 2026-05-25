@@ -34,7 +34,8 @@ async function findGctTab() {
   return tabs[0];
 }
 
-// Inject and execute in the page's MAIN world so we can access g_ck and session cookies
+// Inject and execute in the page's MAIN world so we can access g_ck and rely
+// on the user's existing same-origin session (no chrome.cookies API needed)
 async function injectAndExec(tabId, fn, args) {
   // Step 1: inject snowFetch helper into the MAIN world
   await chrome.scripting.executeScript({
