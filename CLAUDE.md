@@ -4,11 +4,31 @@
 Chrome extension (Manifest V3) for managing ServiceNow tickets via sidebar. Target instance: `avaya.service-now.com`. Authentication relies on the browser's existing SSO session — no API tokens.
 
 ## Architecture
-- **panel.html / panel.js** — Sidebar UI with 4 tabs: List (default), Work Note, Action, Query
-- **background.js** — Service worker handling message routing; injects scripts into SNOW tab
+- **panel.html / panel.js** — Sidebar UI with 5 tabs: List (default), Work Note, Action, Query, Siebel Note
+- **background.js** — Service worker handling message routing; injects scripts into SNOW and GCT tabs
 - **note-fields.js** — Shared module (works in both service worker and browser); builds comment field maps via `buildCommentFields()`
 - **content-snow.js** — Injected into SNOW page's MAIN world; provides `snowFetch()` which uses `g_ck` + cookies
-- Two-step injection: inject `content-snow.js` first, then `executeScript` with a function that calls `snowFetch`
+- **content-gct.js** — Injected into GCT page's MAIN world; provides `window._siebel` namespace with 8 step methods using Siebel's JavaScript API
+- Two-step injection: inject content script first, then `executeScript` with a function that calls the injected API
+
+- `gctInjected` flag in background.js ensures content-gct.js is injected only once per workflow (reset on navigation)
+
+## Siebel/GCT Automation (content-gct.js)
+- GCT tab at `gct.avaya.com` is separate from SNOW tab; `findGctTab()` opens one if none exists
+- Navigation uses URL-based `GotoView` via `chrome.tabs.update` — `theApplication().GotoView()` doesn't exist
+- After navigation, `pollSiebelReady()` polls `ActiveViewName()` every 1s until non-null (max 30s)
+- **CRITICAL:** Siebel method call conventions (verified live GCT):
+  - **NewRecord must be applet-level:** `applet.InvokeMethod("NewRecord")` — `bc.InvokeMethod("NewRecord", 1)` silently fails (no new record created, cursor stays on existing). This applies to both Activity and Time applets.
+  - **Must use BC InvokeMethod:** `ClearToQuery`, `WriteRecord`, `FirstRecord` — direct calls throw "is not a function"
+  - **Must use DIRECT call:** `bc.SetFieldValue(field, val)` — `bc.InvokeMethod("SetFieldValue", ...)` silently does NOTHING
+  - **Direct call OK:** `GetFieldValue`, `FindApplet`, `BusComp` — work without InvokeMethod
+- **CRITICAL:** Field names verified in live GCT: "Type" (NOT "Activity Type"), "Description" (NOT "Comments"), "Status" (may be LOV-constrained on new records)
+- Siebel REST API is NOT available on gct.avaya.com (404 on `/Siebel/v1.0/data/describe`) — JS API is the only option
+- Query execution is applet-level: `applet.InvokeMethod("NewQuery")` + `applet.InvokeMethod("ExecuteQuery")`
+- Error checking via `app.GetErrorCount()` and `app.GetErrorMsg(0)` after query and save
+- `GetFieldValue` works directly (no InvokeMethod needed); `FindApplet` and `BusComp` also direct
+- Step wrapper functions in background.js (e.g. `gctQuerySR`) delegate to `window._siebel` methods
+- 8-step workflow: navigate list view → query SR → navigate detail → verify activities → new activity → fill form → log time → save
 
 ## Key Patterns
 - All API calls go through `snowFetch()` in the page's MAIN world (required for auth)

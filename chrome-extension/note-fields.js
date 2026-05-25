@@ -7,6 +7,7 @@
 
   if (root) {
     root.buildCommentFields = api.buildCommentFields;
+    root.formatEffort = api.formatEffort;
   }
 })(typeof globalThis !== "undefined" ? globalThis : this, function() {
   function formatEffort(effortMinutes) {
@@ -39,5 +40,5 @@
     return fields;
   }
 
-  return { buildCommentFields };
+  return { buildCommentFields, formatEffort };
 });

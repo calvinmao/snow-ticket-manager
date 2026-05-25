@@ -13,7 +13,10 @@ workflow dozens of times per day.
 ## Solution
 
 Add a "Siebel Note" tab to the existing Chrome extension sidebar that automates the
-post-login GCT activity creation workflow via DOM automation.
+post-login GCT activity creation workflow via Siebel's JavaScript API
+(`theApplication()`, `BusComp`, `InvokeMethod`). This approach avoids DOM
+interaction entirely — critical for background tab operation where Chrome
+throttles DOM events.
 
 ## Scope
 
@@ -52,21 +55,22 @@ When the user clicks "Create Activity & Save", background.js orchestrates:
 
 ```
 1. Find/open GCT tab (gct.avaya.com)
-2. Navigate: Service → All Service Requests
-3. Query: enter SR number in SR List Applet, execute query
-4. Drill: click SR hyperlink in results
-5. Navigate: click Activities tab in SR detail view
-6. Create Activity:
-   a. Click "New" in Activity List Applet
-   b. Set activity type (e.g., SR Status - Outbound)
-   c. Enter comments
-   d. Set status (e.g., Done)
-7. Log Time:
-   a. Click "New" in Time List Applet
-   b. Click Minutes field to activate calculator input
-   c. Enter time value
-8. Save: Ctrl+S
+2. Navigate via URL: Service → All Service Requests (chrome.tabs.update + polling)
+3. Query: Siebel JS API — InvokeMethod SetSearchSpec on Service Request BC
+4. Navigate via URL: Service Request Detail View (drill-in)
+5. Verify: Activity List Applet loaded in detail view
+6. Create Activity: InvokeMethod NewRecord on Activity BC
+7. Fill Form: InvokeMethod SetFieldValue for type, comments, status
+8. Log Time: InvokeMethod NewRecord + SetFieldValue on Time BC
+9. Save: InvokeMethod WriteRecord on Activity BC
 ```
+
+**Key technical decisions:**
+- Navigation uses URL-based GotoView (chrome.tabs.update) since theApplication().GotoView doesn't exist
+- Siebel readiness detected by polling `ActiveViewName()` every 1s after page load (not fixed delay)
+- All BC action methods use `InvokeMethod()` — direct calls like `bc.ClearToQuery()` throw "is not a function"
+- Query execution is applet-level: `applet.InvokeMethod("NewQuery")` + `applet.InvokeMethod("ExecuteQuery")`
+- Content script injected once per workflow (gctInjected flag), not 8 times
 
 Each step reports back to the result area. If any step fails, the chain stops and
 reports which step failed with the error.
@@ -80,7 +84,7 @@ reports which step failed with the error.
 | `chrome-extension/panel.html` | Add Siebel Note tab button + form section |
 | `chrome-extension/panel.js` | Tab switching, form handler, send request to background, display results |
 | `chrome-extension/background.js` | New `siebelCreateActivity` message handler — finds GCT tab, injects content-gct.js, orchestrates step sequence |
-| `chrome-extension/content-gct.js` | **New** — Siebel DOM interaction functions |
+| `chrome-extension/content-gct.js` | **New** — Siebel JavaScript API automation (InvokeMethod-based) |
 
 ### Data Flow
 
@@ -102,16 +106,22 @@ panel.js ◄──{ success: true, steps: [...] }──────────�
 
 ### Step-based protocol
 
-`background.js` sends one command at a time to `content-gct.js`:
+`background.js` calls step wrapper functions via `injectAndExecGct()`, which executes
+them in the GCT page's MAIN world where `window._siebel` is defined:
 
 ```js
-// background → content
-{ cmd: "querySR", srNumber: "1-23642931672" }
+// background.js step wrapper (runs in MAIN world via executeScript)
+function gctQuerySR(srNumber) {
+  return window._siebel.querySR(srNumber);
+}
 
-// content → background
-{ ok: true }
-// or
-{ error: "SR not found" }
+// content-gct.js implementation (runs in MAIN world)
+querySR: function (srNumber) {
+  // ... Siebel InvokeMethod calls ...
+  bc.InvokeMethod("SetSearchSpec", "SR Number", srNumber);
+  applet.InvokeMethod("ExecuteQuery");
+  // ...
+}
 ```
 
 This matches the existing `snowFetch` injection pattern and keeps
@@ -129,18 +139,19 @@ retry/failure logic centralized in the service worker.
 |---|---|
 | GCT tab not open / not logged in | "Open gct.avaya.com and log in first" |
 | SR not found | "SR X not found. Check the number and try again." |
-| Siebel UI element not found | "Could not find [element]. The Siebel UI may have changed." — stop with step name |
-| Save fails | "Save failed — try saving manually with Ctrl+S" |
-| Network timeout (>30s per step) | "Step timed out: [step name]. Check GCT tab responsiveness." |
-| Siebel alert dialog | Dismiss automatically, report dialog text |
+| Siebel applet not found | "Could not find [applet]. The Siebel UI may have changed." — stop with step name |
+| Save fails | "Save failed — [Siebel error message]" |
+| Navigation timeout (>30s) | "Navigation timeout after 30s" |
+| Siebel not ready (>30s polling) | "Siebel not ready after 30s" |
+| Query returns wrong SR | Siebel error check via GetErrorCount/GetErrorMsg |
 
 All errors stop the chain immediately — no partial saves. Form state is preserved for retry.
 
 ## Testing Strategy
 
-1. **Manual end-to-end**: Test with a real GCT SR; happy path first, then edge cases
-2. **`tests/siebel-note.test.js`**: Unit tests for content-gct.js logic (selector construction, data formatting) — not live Siebel
-3. **Background handler tests**: Verify message routing, tab finding, injection logic
+1. **Manual end-to-end**: Test with a real GCT SR via sidebar; verify Siebel JS API calls work in background tab
+2. **`tests/siebel-note.test.js`**: Structural tests for content-gct.js (InvokeMethod patterns, namespace structure), background.js (polling, step sequence), and panel integration
+3. **DevTools console testing**: Verify Siebel API object names and method availability before committing code
 
 ## Out of Scope
 

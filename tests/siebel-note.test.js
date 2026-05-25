@@ -46,8 +46,9 @@ describe("content-gct.js structure", () => {
       "navigateActivities",
       "createNewActivity",
       "fillActivityForm",
-      "logTime",
+      "uncheckSendEmail",
       "save",
+      "logTime",
     ];
     for (const fn of required) {
       assert.ok(
@@ -143,22 +144,46 @@ describe("content-gct.js Siebel API correctness", () => {
     );
   });
 
-  it("uses InvokeMethod for BC operations, not direct calls", () => {
-    // These method names must only appear inside InvokeMethod calls, never standalone
-    const bcMethods = [
+  it("uses applet-level NewRecord (not BC-level)", () => {
+    // NewRecord MUST be called on the applet, not the BC.
+    // bc.InvokeMethod("NewRecord", 1) silently fails — no new record is created.
+    // Only applet.InvokeMethod("NewRecord") properly creates a new record
+    // in the child BC context with parent linkage set by the BO definition.
+    assert.ok(
+      content.includes('applet.InvokeMethod("NewRecord")'),
+      "createNewActivity should use applet-level InvokeMethod for NewRecord"
+    );
+    assert.ok(
+      content.includes('timeApplet.InvokeMethod("NewRecord")'),
+      "logTime should use applet-level InvokeMethod for NewRecord on time applet"
+    );
+    // Verify no CODE-level bc.InvokeMethod("NewRecord") — comments are ok
+    const codeOnly = content.replace(/\/\/.*$/gm, '');
+    assert.ok(
+      !codeOnly.includes('bc.InvokeMethod("NewRecord"'),
+      "should NOT use bc.InvokeMethod for NewRecord in code (silently fails)"
+    );
+  });
+
+  it("uses InvokeMethod for BC write operations", () => {
+    // These BC-level methods use InvokeMethod — direct calls throw "is not a function"
+    const invokeMethods = [
       "ClearToQuery",
       "FirstRecord",
-      "NewRecord",
-      "SetFieldValue",
       "WriteRecord",
     ];
-    for (const method of bcMethods) {
-      // Should find at least one InvokeMethod call with this method name
+    for (const method of invokeMethods) {
       assert.ok(
         content.includes('InvokeMethod("' + method + '"'),
         'should use InvokeMethod("' + method + '") for BC operations'
       );
     }
+    // SetFieldValue must use DIRECT call, not InvokeMethod.
+    // bc.InvokeMethod("SetFieldValue", ...) silently does NOTHING.
+    assert.ok(
+      content.includes('bc.SetFieldValue('),
+      "should use direct bc.SetFieldValue() for field setting (InvokeMethod silently fails)"
+    );
   });
 
   it("uses execCommand for query input, not SetSearchSpec", () => {
@@ -207,6 +232,23 @@ describe("content-gct.js Siebel API correctness", () => {
     );
   });
 
+  it("drillIntoSR verifies applets are loaded before resolving", () => {
+    // Two-phase polling: first view name, then applet availability
+    assert.ok(
+      content.includes("viewReady"),
+      "should track view readiness phase"
+    );
+    assert.ok(
+      content.includes('FindApplet("Activity List Applet With Navigation")') &&
+      content.includes("drillIntoSR"),
+      "should verify Activity List Applet is loaded before resolving drill-in"
+    );
+    assert.ok(
+      content.includes("Detail view loaded but applets not ready"),
+      "should report meaningful error when view loads but applets don't"
+    );
+  });
+
   it("suppresses window.alert and window.confirm to prevent blocking", () => {
     assert.ok(
       content.includes("window.alert") && content.includes("window._siebelDialogs"),
@@ -227,16 +269,153 @@ describe("content-gct.js Siebel API correctness", () => {
       content.includes('"Activity List Applet With Navigation"'),
       "should use Activity List Applet With Navigation for activity creation"
     );
-  });
-
-  it("falls back to list applet BC when form applet is unavailable", () => {
+    // Also accepts alternate names from a11y snapshot
     assert.ok(
-      content.includes('app.FindApplet("Activity Form Applet")'),
-      "should try Activity Form Applet first"
+      content.includes('"Activities List Applet"'),
+      "should accept Activities List Applet as alternate name (from a11y snapshot)"
     );
     assert.ok(
-      content.includes('app.FindApplet("Activity List Applet With Navigation")'),
-      "should fall back to Activity List Applet when form applet not found"
+      content.includes('"Time List Applet"'),
+      "should accept Time List Applet as alternate name (from a11y snapshot)"
+    );
+  });
+
+  it("has applet discovery helpers", () => {
+    assert.ok(
+      content.includes("function findActivitiesApplet"),
+      "should define findActivitiesApplet helper"
+    );
+    assert.ok(
+      content.includes("function findFormApplet"),
+      "should define findFormApplet helper"
+    );
+    assert.ok(
+      content.includes("function findTimeApplet"),
+      "should define findTimeApplet helper"
+    );
+    // Form applet uses dynamic name discovery via GetAppletMap
+    assert.ok(
+      content.includes("GetAppletMap") && content.includes("Activity - .* Form Applet"),
+      "findFormApplet should discover type-specific form applets via regex on applet map"
+    );
+  });
+
+  it("uses PM API for field setting with DOM fallback", () => {
+    // PM API approach
+    assert.ok(
+      content.includes("GetPModel"),
+      "should use GetPModel to access Presentation Model"
+    );
+    assert.ok(
+      content.includes('ExecuteMethod("GetControl"'),
+      "should use PM GetControl to find field controls"
+    );
+    assert.ok(
+      content.includes('ExecuteMethod("LeaveField"'),
+      "should try PM LeaveField for form applet field setting"
+    );
+    assert.ok(
+      content.includes('ExecuteMethod("OnCtrlBlur"'),
+      "should try PM OnCtrlBlur for list applet field setting"
+    );
+    assert.ok(
+      content.includes("setFieldViaPM"),
+      "should define setFieldViaPM helper for PM-level field setting"
+    );
+
+    // PM metadata for DOM element discovery
+    assert.ok(
+      content.includes("findElementViaPM"),
+      "should define findElementViaPM helper that uses PM.GetInputName for DOM discovery"
+    );
+    assert.ok(
+      content.includes("GetInputName"),
+      "should use control.GetInputName() to find actual HTML element name"
+    );
+
+    // Label-based DOM search (Siebel uses <label> elements, NOT aria-label)
+    assert.ok(
+      content.includes("findInputByLabel"),
+      "should define findInputByLabel helper for label-based element discovery"
+    );
+
+    // BC SetFieldValue is kept as last-resort fallback
+    assert.ok(
+      content.includes('bc.SetFieldValue("Description"') || content.includes('bcAfter.SetFieldValue("Description"'),
+      "should fall back to bc.SetFieldValue for Description"
+    );
+    assert.ok(
+      content.includes('bc.SetFieldValue("Status"') || content.includes('bcAfter.SetFieldValue("Status"'),
+      "should fall back to bc.SetFieldValue for Status"
+    );
+  });
+
+  it("tracks field setting results per strategy", () => {
+    // fillActivityForm tracks which strategy worked for each field
+    assert.ok(
+      content.includes("results.description") && content.includes("results.status"),
+      "should track results for each field separately"
+    );
+    assert.ok(
+      content.includes('"form-pm"') && content.includes('"dom"') && content.includes('"bc"'),
+      "should track which strategy (form-pm, dom, or bc) was used"
+    );
+    // Only uses BC fallback for fields not yet set
+    assert.ok(
+      content.includes("!results.description"),
+      "should only try BC fallback for Description if not already set"
+    );
+    assert.ok(
+      content.includes("!results.status"),
+      "should only try BC fallback for Status if not already set"
+    );
+  });
+
+  it("uses correct Siebel field names (verified in live GCT)", () => {
+    // Field names verified via bc.GetFieldValue() in live GCT console:
+    //   "Description" (NOT "Comments" — returns empty)
+    //   "Status" (LOV field, may have BC-level constraints)
+    //   "AVAYA Reported Time Minutes" (NOT "Minutes" which returns empty)
+    assert.ok(
+      content.includes('SetFieldValue("Description"') ||
+      content.includes('GetControl", "Description"'),
+      'should use "Description" field for comments (not "Comments")'
+    );
+    assert.ok(
+      content.includes('SetFieldValue("AVAYA Reported Time Minutes"') ||
+      content.includes('GetControl", "AVAYA Reported Time Minutes"'),
+      'should use "AVAYA Reported Time Minutes" for time field'
+    );
+    assert.ok(
+      !content.includes('SetFieldValue("Activity Type"'),
+      'should NOT use "Activity Type" (invalid field name)'
+    );
+    assert.ok(
+      !content.includes('SetFieldValue("Comments"'),
+      'should NOT use "Comments" (invalid field name)'
+    );
+  });
+
+  it("uncheckSendEmail uses PM control iteration and label-based DOM search", () => {
+    // Send Email checkbox — uses PM GetControls to find checkbox, then label-based search
+    assert.ok(
+      content.includes("clickCheckbox"),
+      "should use clickCheckbox helper for unchecking"
+    );
+    // PM-based strategy: iterates GetControls to find Send checkbox by name/UI type
+    assert.ok(
+      content.includes('pm.Get("GetControls")') && content.includes("GetInputName"),
+      "should iterate PM controls and use GetInputName to find checkbox DOM element"
+    );
+    // Label-based fallback: searches for <label> with "Send" text
+    assert.ok(
+      content.includes("/send.*(?:update|email)/i"),
+      "should search for label text matching Send Update/Send Email pattern"
+    );
+    // Never rejects — best-effort
+    assert.ok(
+      content.includes("uncheckSendEmail") && content.includes("Send Email"),
+      "uncheckSendEmail should resolve with warning if checkbox not found"
     );
   });
 });
@@ -296,8 +475,9 @@ describe("background.js navigation and step orchestration", () => {
       "gctNavigateActivities",
       "gctCreateNewActivity",
       "gctFillActivityForm",
-      "gctLogTime",
+      "gctUncheckSendEmail",
       "gctSave",
+      "gctLogTime",
     ];
 
     // Verify each step function is referenced
@@ -308,5 +488,13 @@ describe("background.js navigation and step orchestration", () => {
         fnName + " should be referenced in background.js"
       );
     }
+
+    // Verify save comes before logTime (save must commit parent activity first)
+    const savePos = content.indexOf("gctSave");
+    const logTimePos = content.indexOf("gctLogTime");
+    assert.ok(
+      savePos < logTimePos,
+      "save step should come before logTime step (parent must be committed first)"
+    );
   });
 });
